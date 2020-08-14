@@ -137,10 +137,10 @@ func Spawn(size int, fn func(int)) *sync.WaitGroup {
 	wg := new(sync.WaitGroup)
 	for i := 0; i < size; i++ {
 		wg.Add(1)
-		go func() {
+		go func(i int) {
 			defer wg.Done()
 			fn(i)
-		}()
+		}(i)
 	}
 	return wg
 }
