@@ -32,7 +32,7 @@ import (
 
 var ns_notfound error = errors.New("Namespace not registed")
 
-// 关于 key 的互斥锁
+// KeyMutex : 关于 key 的互斥锁
 type KeyMutex struct {
 	reglock *sync.Map
 	timeout time.Duration
