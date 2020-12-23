@@ -3,6 +3,7 @@ package mutex
 import (
 	"container/heap"
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 )
@@ -18,6 +19,7 @@ type Plock struct {
 	ctx      context.Context
 	cancelFn context.CancelFunc
 	lock     *sync.Mutex
+	s        int32
 }
 
 // UnlockFn :
@@ -38,12 +40,20 @@ func (p *Plock) Lock(pri byte) UnlockFn {
 	//fmt.Println("-->", pri, item.n, 2, "lockCh=", lockCh)
 	var unlockCh chan struct{}
 	// 3
-	p.eventCh <- struct{}{}
+	if atomic.LoadInt32(&p.s) == 0 {
+		atomic.SwapInt32(&p.s, 1)
+		p.eventCh <- struct{}{}
+	}
 	//fmt.Println("-->", pri, item.n, 3, "wait", "lockCh=", lockCh)
 	// 4
 	unlockCh = <-lockCh
 	//fmt.Println("-->", pri, item.n, 4, "notify", "unlockCh", unlockCh)
 	return func() uint64 {
+		defer func() {
+			if err := recover(); err != nil {
+				fmt.Println("unlock err ------>", err)
+			}
+		}()
 		//fmt.Println("-->", pri, "unlock")
 		close(unlockCh)
 		return item.n
@@ -52,13 +62,13 @@ func (p *Plock) Lock(pri byte) UnlockFn {
 
 // NewPlock :
 func NewPlock(_ctx context.Context) *Plock {
-	slot := 200000
+	slot := 1000000
 	ctx, cancelFn := context.WithCancel(_ctx)
 	pl := &Plock{
 		Queue:    make([]*Item, 0),
 		smap:     new(sync.Map),
 		mmap:     make(map[uint64]chan chan struct{}, slot),
-		eventCh:  make(chan struct{}, slot*2),
+		eventCh:  make(chan struct{}, slot),
 		ctx:      ctx,
 		cancelFn: cancelFn,
 		lock:     new(sync.Mutex),
@@ -67,42 +77,32 @@ func NewPlock(_ctx context.Context) *Plock {
 	return pl
 }
 
-func (p *Plock) disp(i *Item) {
-	// 7
-	v, ok := p.smap.LoadAndDelete(i.n)
-	//fmt.Println("-->", i.p, i.n, 7, ok, v)
-	if !ok {
-		panic("TODO : load can not be fail")
-	}
-	unlockCh := make(chan struct{})
-	// 8
-	v.(chan chan struct{}) <- unlockCh
-	//fmt.Println("-->", i.p, i.n, 8, "lockCh <- unlockCh :", "unlockCh=", unlockCh, "lockCh=", v)
-	<-unlockCh
-	//fmt.Println("-->", i.p, i.n, 6)
-}
-
 func (p *Plock) eventHandler() {
-	for {
-		select {
-		case <-p.eventCh:
-			// 5
+	disp := func() {
+		// 5
+		if v, ok := func() (v chan chan struct{}, ok bool) {
 			p.lock.Lock()
+			defer p.lock.Unlock()
+			if len(p.Queue) == 0 {
+				atomic.SwapInt32(&p.s, 0)
+				return
+			}
 			o := heap.Pop(p)
 			i := o.(*Item)
-			v, ok := p.mmap[i.n]
-			if !ok {
-				panic("TODO : load can not be fail")
-			}
+			v, ok = p.mmap[i.n]
 			delete(p.mmap, i.n)
-			p.lock.Unlock()
+			return
+		}(); ok {
 			unlockCh := make(chan struct{})
 			v <- unlockCh
 			<-unlockCh
-			//fmt.Println("eventHandler-loop", i)
-			//fmt.Println("-->", i.p, i.n, 5)
-			// 6
-			//p.disp(i)
+			p.eventCh <- struct{}{}
+		}
+	}
+	for {
+		select {
+		case <-p.eventCh:
+			go disp()
 		case <-p.ctx.Done():
 			return
 		}
