@@ -30,14 +30,14 @@ func TestRLock(t *testing.T) {
 			pl.RUnlock()
 			fmt.Println(time.Now(), "[test] --> Read : ", i, rmap)
 		}
-		for n := 0; n < 5; n++ {
+		for n := 0; n < 2; n++ {
 			go func() {
 				i := 0
-				for {
+				for j := 0; j < 10; j++ {
 					select {
 					case <-stopCh:
 						fn(i)
-						return
+						panic(1)
 					default:
 						fn(i)
 					}
@@ -56,7 +56,6 @@ func TestRLock(t *testing.T) {
 				wg.Done()
 				fmt.Println(time.Now(), "[test] --> Write Done.", j)
 			}()
-			time.Sleep(1 * time.Millisecond)
 			for n := 0; n < 10000; n++ {
 				pl.Lock()
 				m[fmt.Sprintf("%d-%d", j, n)] = n
@@ -165,5 +164,35 @@ func TestFoo(t *testing.T) {
 	i, err := writer.Write([]byte{1, 1, 1, 1, 1, 1, 1, 1})
 	fmt.Println("write <-", i, err)
 	time.Sleep(2 * time.Second)
+
+}
+
+func TestCond(t *testing.T) {
+	c := sync.NewCond(new(sync.Mutex))
+	go func() {
+		for {
+			c.L.Lock()
+			fmt.Println("111111111-wait")
+			c.Wait()
+			fmt.Println("111111111-active")
+			c.L.Unlock()
+		}
+	}()
+	go func() {
+		for {
+			c.L.Lock()
+			fmt.Println("222222222-wait")
+			c.Wait()
+			fmt.Println("222222222-active")
+			c.L.Unlock()
+		}
+	}()
+
+	time.Sleep(1 * time.Second)
+	c.Broadcast()
+	time.Sleep(1 * time.Second)
+	c.Broadcast()
+	time.Sleep(1 * time.Second)
+	fmt.Println("Done.")
 
 }

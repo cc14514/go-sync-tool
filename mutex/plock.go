@@ -13,7 +13,7 @@ type Plock struct {
 	Queue        []*Item
 	smap         *sync.Map
 	mmap         map[uint64]chan chan struct{}
-	eventCh, rCh chan struct{}
+	eventCh      chan struct{}
 	ctx          context.Context
 	lock         *sync.Mutex
 	tlock        *sync.RWMutex
@@ -21,6 +21,7 @@ type Plock struct {
 	rc           int32
 	lastUnlockFn UnlockFn
 	nonce        uint64
+	rcond        *sync.Cond
 }
 
 // UnlockFn :
@@ -37,7 +38,9 @@ func (p *Plock) RLock() {
 		return
 	}
 	// blocked
-	<-p.rCh
+	p.rcond.L.Lock()
+	p.rcond.Wait()
+	p.rcond.L.Unlock()
 }
 
 // RUnlock : read unlock
@@ -102,7 +105,7 @@ func NewPlock(_ctx context.Context) *Plock {
 		smap:    new(sync.Map),
 		mmap:    make(map[uint64]chan chan struct{}, slot),
 		eventCh: make(chan struct{}, slot),
-		rCh:     make(chan struct{}),
+		rcond:   sync.NewCond(new(sync.Mutex)),
 		lock:    new(sync.Mutex),
 		tlock:   new(sync.RWMutex),
 	}
@@ -121,8 +124,9 @@ func (p *Plock) eventHandler() []func() {
 			defer p.lock.Unlock()
 			if len(p.Queue) == 0 {
 				// RLock disp
-				close(p.rCh)
-				p.rCh = make(chan struct{})
+				p.rcond.L.Lock()
+				p.rcond.Broadcast()
+				p.rcond.L.Unlock()
 				atomic.SwapInt32(&p.ws, 0)
 				return
 			}
