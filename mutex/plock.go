@@ -1,60 +1,53 @@
 package mutex
 
 import (
-	"container/heap"
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
+	"unsafe"
 )
 
 // Plock :
 type Plock struct {
-	Queue        []*Item
-	smap         *sync.Map
-	mmap         map[uint64]chan chan struct{}
+	Stack        *ABStack
+	mmap         map[uint]chan chan struct{}
 	eventCh      chan struct{}
 	ctx          context.Context
 	lock         *sync.Mutex
 	tlock        *sync.RWMutex
-	ws           int32
-	rc           int32
 	lastUnlockFn UnlockFn
-	nonce        uint64
-	rcond        *sync.Cond
+}
+
+// NewPlock :
+func NewPlock(_ctx context.Context) *Plock {
+	slot := 16
+	pl := &Plock{
+		ctx: _ctx,
+		//Queue:   make([]*Item, 0),
+		Stack:   NewABStack(),
+		mmap:    make(map[uint]chan chan struct{}, slot),
+		eventCh: make(chan struct{}, slot),
+		lock:    new(sync.Mutex),
+		tlock:   new(sync.RWMutex),
+	}
+
+	for _, fn := range pl.eventHandler() {
+		go fn()
+	}
+	return pl
 }
 
 // UnlockFn :
-type UnlockFn func() uint64
+type UnlockFn func() uint
 
 // RLock : read lock
 func (p *Plock) RLock() {
-	defer func() {
-		p.tlock.RLock()
-		rc := atomic.AddInt32(&p.rc, 1)
-		fmt.Println("rlock->", rc)
-	}()
-	if atomic.LoadInt32(&p.ws) < 1 {
-		return
-	}
-	// blocked
-	p.rcond.L.Lock()
-	p.rcond.Wait()
-	p.rcond.L.Unlock()
+	p.tlock.RLock()
 }
 
 // RUnlock : read unlock
 func (p *Plock) RUnlock() {
-	defer p.tlock.RUnlock()
-	if old := atomic.AddInt32(&p.rc, -1); old == 0 {
-		fmt.Println("runlock<-", old)
-		p.eventCh <- struct{}{}
-	}
-}
-
-// Lock : default priority is 254
-func (p *Plock) Lock() {
-	p.lastUnlockFn = p.Lock1(254)
+	p.tlock.RUnlock()
 }
 
 // Unlock :
@@ -64,27 +57,37 @@ func (p *Plock) Unlock() {
 	}
 }
 
+// Lock : default priority is 254
+func (p *Plock) Lock() {
+	p.lastUnlockFn = p.lockFn(1)
+}
+
+// Lock0 :
+func (p *Plock) Lock0() {
+	p.lastUnlockFn = p.lockFn(0)
+}
+
 // Lock1 : pri to set priority
-func (p *Plock) Lock1(pri byte) UnlockFn {
+func (p *Plock) lockFn(pri byte) UnlockFn {
 	// 1 注册一个拿锁请求
-	p.lock.Lock()
-	item := newItem(pri, &p.nonce)
-	heap.Push(p, item)
-	// 2
 	lockCh := make(chan chan struct{}, 1)
+	n := uintptr(unsafe.Pointer(&lockCh))
+	p.lock.Lock()
+	item := newItem(pri, uint(n))
+	p.Stack.Push(item)
+	// 2
 	p.mmap[item.n] = lockCh
 	p.lock.Unlock()
+
 	var unlockCh chan struct{}
 	// 3 等读锁
-	if atomic.LoadInt32(&p.ws) < 1 && atomic.LoadInt32(&p.rc) < 1 {
-		atomic.SwapInt32(&p.ws, 1)
-		p.eventCh <- struct{}{}
-	}
+	p.eventCh <- struct{}{}
+
 	// 4 等待叫号
 	unlockCh = <-lockCh
 	// 5 到号，上锁
 	p.tlock.Lock()
-	return func() uint64 {
+	return func() uint {
 		defer func() {
 			if err := recover(); err != nil {
 				fmt.Println("unlock err :", err)
@@ -96,52 +99,23 @@ func (p *Plock) Lock1(pri byte) UnlockFn {
 	}
 }
 
-// NewPlock :
-func NewPlock(_ctx context.Context) *Plock {
-	slot := 1000000
-	pl := &Plock{
-		ctx:     _ctx,
-		Queue:   make([]*Item, 0),
-		smap:    new(sync.Map),
-		mmap:    make(map[uint64]chan chan struct{}, slot),
-		eventCh: make(chan struct{}, slot),
-		rcond:   sync.NewCond(new(sync.Mutex)),
-		lock:    new(sync.Mutex),
-		tlock:   new(sync.RWMutex),
-	}
-	for _, fn := range pl.eventHandler() {
-		go fn()
-	}
-	return pl
-}
-
 func (p *Plock) eventHandler() []func() {
 	disp := func() {
-		//disp := func() {
-		// 5
 		if v, ok := func() (v chan chan struct{}, ok bool) {
 			p.lock.Lock()
-			defer p.lock.Unlock()
-			if len(p.Queue) == 0 {
-				// RLock disp
-				p.rcond.L.Lock()
-				p.rcond.Broadcast()
-				p.rcond.L.Unlock()
-				atomic.SwapInt32(&p.ws, 0)
+			if p.Stack.Size() == 0 {
+				p.lock.Unlock()
 				return
 			}
-			o := heap.Pop(p) // pop is a write opt so take mutex lock
-			i := o.(*Item)
+			i := p.Stack.Pop()
 			v, ok = p.mmap[i.n]
 			delete(p.mmap, i.n)
+			p.lock.Unlock()
 			return
 		}(); ok {
 			unlockCh := make(chan struct{})
 			v <- unlockCh
 			<-unlockCh
-			if atomic.LoadInt32(&p.rc) < 1 {
-				p.eventCh <- struct{}{}
-			}
 		}
 	}
 	return []func(){
@@ -154,49 +128,87 @@ func (p *Plock) eventHandler() []func() {
 					return
 				}
 			}
-			/*
-				}, func() {
-				}, func() {
-			*/
 		},
 	}
 }
 
-func newItem(p byte, nonce *uint64) *Item {
-	return &Item{p, atomic.AddUint64(nonce, 1)}
+func newItem(p byte, ptr uint) *Item {
+	return &Item{p, ptr}
 }
 
 // Item :
 type Item struct {
-	p byte   // priority : hi to low : 0~255
-	n uint64 // nonce auto inc
+	p byte
+	n uint
 }
 
-// Push impl heap.Interface
-func (p *Plock) Push(x interface{}) {
-	p.Queue = append(p.Queue, x.(*Item))
+// ABStack :
+type ABStack struct {
+	a, b   byte
+	stacka []*Item
+	stackb []*Item
 }
 
-// Pop impl heap.Interface
-func (p *Plock) Pop() (v interface{}) {
-	//p.Queue, v = p.Queue[1:len(p.Queue)], p.Queue[0] // head : low
-	p.Queue, v = p.Queue[:len(p.Queue)-1], p.Queue[len(p.Queue)-1] // head : height
+// NewABStack :
+func NewABStack() *ABStack {
+	return &ABStack{0, 1, make([]*Item, 0), make([]*Item, 0)}
+}
+
+// Push :
+func (l *ABStack) Push(i *Item) {
+	switch i.p {
+	case l.a:
+		l.stacka = append(l.stacka, i)
+	case l.b:
+		l.stackb = append(l.stackb, i)
+	default:
+		panic("error a / b")
+	}
+
+}
+
+// Size :
+func (l *ABStack) Size() int {
+	return len(l.stacka) + len(l.stackb)
+}
+
+// Empty :
+func (l *ABStack) Empty() bool {
+	if l.Size() > 0 {
+		return false
+	}
+	return true
+}
+
+// Pop :
+func (l *ABStack) Pop() (v *Item) {
+	if len(l.stacka) > 0 {
+		return l.PopA()
+	}
+	return l.PopB()
+}
+
+// PopA :
+func (l *ABStack) PopA() (v *Item) {
+	if len(l.stacka) > 0 {
+		l.stacka, v = l.stacka[:len(l.stacka)-1], l.stacka[len(l.stacka)-1]
+	}
 	return
 }
 
-// Len is the number of elements in the collection.
-func (p *Plock) Len() int {
-	return len(p.Queue)
+// PopB :
+func (l *ABStack) PopB() (v *Item) {
+	if len(l.stackb) > 0 {
+		l.stackb, v = l.stackb[:len(l.stackb)-1], l.stackb[len(l.stackb)-1]
+	}
+	return
 }
 
-// Less reports whether the element with
-// index i should sort before the element with index j.
-func (p *Plock) Less(i int, j int) bool {
-	//return p.Queue[i].p > p.Queue[j].p // head : low
-	return p.Queue[i].p < p.Queue[j].p // head : height
-}
-
-// Swap swaps the elements with indexes i and j.
-func (p *Plock) Swap(i int, j int) {
-	p.Queue[i], p.Queue[j] = p.Queue[j], p.Queue[i]
+// ForEach :
+func (l *ABStack) ForEach(f func(*Item) bool) {
+	for _, i := range append(l.stacka, l.stackb...) {
+		if !f(i) {
+			return
+		}
+	}
 }

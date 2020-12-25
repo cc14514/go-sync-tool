@@ -3,12 +3,11 @@ package mutex
 import (
 	"context"
 	"fmt"
-	"net"
-	"os"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 var pl = NewPlock(context.Background())
@@ -83,13 +82,13 @@ func TestUnlock(t *testing.T) {
 	}
 	go rfn(1)
 	time.Sleep(100 * time.Microsecond)
-	unlock := pl.Lock1(1)
+	pl.Lock()
 	go rfn(3)
 	go rfn(2)
 	fmt.Println(time.Now(), "[test] -------> lock")
 	time.Sleep(2 * time.Second)
-	n := unlock()
-	fmt.Println(time.Now(), "[test] -------> unlock", n)
+	pl.Unlock()
+	fmt.Println(time.Now(), "[test] -------> unlock")
 	wg.Wait()
 }
 
@@ -100,10 +99,10 @@ func TestPlock(t *testing.T) {
 		wg.Add(total + 1)
 		fn := func(p byte) {
 			//fmt.Println(p, " -> take-lock")
-			unlock := pl.Lock1(1)
+			pl.Lock()
 			//fmt.Println(p, " -> locked")
 			defer func() {
-				unlock()
+				pl.Unlock()
 				//n := unlock()
 				//fmt.Println("unlocked", ",", p, ",", n)
 				wg.Done()
@@ -139,60 +138,105 @@ func TestPlock(t *testing.T) {
 	})
 }
 
-func TestFoo(t *testing.T) {
-	addr := &net.UnixAddr{Name: "/tmp/a.sock"}
-	addr2 := &net.UnixAddr{Name: "/tmp/b.sock"}
-	proto := "unixgram"
-	os.Remove(addr.Name)
-	os.Remove(addr2.Name)
-	sock, err := net.ListenUnixgram(proto, addr)
-	if err != nil {
-		panic(err)
+func TestAsync(t *testing.T) {
+	wg := new(sync.WaitGroup)
+	m := make(map[string]int)
+	writer := func(i int) {
+		defer func() {
+			wg.Done()
+			fmt.Println(time.Now(), "[test] <-- Writer Done: ", i)
+		}()
+		for j := 0; j < 100000; j++ {
+			pl.Lock()
+			k := fmt.Sprintf("t-%d", i)
+			x := m[k]
+			m[k] = x + j
+			pl.Unlock()
+		}
 	}
+	// reader
+	go func() {
+		t := time.NewTicker(10 * time.Millisecond)
+		for {
+			pl.RLock()
+			fmt.Println(time.Now(), "[test] --> Read : ", m)
+			pl.RUnlock()
+			<-t.C
+		}
 
-	reader := func(k string, sock *net.UnixConn) {
-		buf := make([]byte, 8)
-		i, err := sock.Read(buf)
-		fmt.Println(k, err, i)
+	}()
+	n := 20
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go writer(i)
 	}
-	go reader("a", sock)
-	go reader("b", sock)
-	writer, err := net.DialUnix(proto, addr2, addr)
-	if err != nil {
-		panic(err)
-	}
-	i, err := writer.Write([]byte{1, 1, 1, 1, 1, 1, 1, 1})
-	fmt.Println("write <-", i, err)
-	time.Sleep(2 * time.Second)
-
+	wg.Wait()
+	fmt.Println("Test Done.")
 }
 
-func TestCond(t *testing.T) {
-	c := sync.NewCond(new(sync.Mutex))
-	go func() {
-		for {
-			c.L.Lock()
-			fmt.Println("111111111-wait")
-			c.Wait()
-			fmt.Println("111111111-active")
-			c.L.Unlock()
+func TestAsync2(t *testing.T) {
+	pl := new(sync.RWMutex)
+	wg := new(sync.WaitGroup)
+	m := make(map[string]int)
+	writer := func(i int) {
+		defer func() {
+			wg.Done()
+			fmt.Println(time.Now(), "[test] <-- Writer Done: ", i)
+		}()
+		for j := 0; j < 100000; j++ {
+			pl.Lock()
+			k := fmt.Sprintf("t-%d", i)
+			x := m[k]
+			m[k] = x + j
+			pl.Unlock()
 		}
-	}()
+	}
+	// reader
 	go func() {
+		t := time.NewTicker(10 * time.Millisecond)
 		for {
-			c.L.Lock()
-			fmt.Println("222222222-wait")
-			c.Wait()
-			fmt.Println("222222222-active")
-			c.L.Unlock()
+			pl.RLock()
+			fmt.Println(time.Now(), "[test] --> Read : ", m)
+			pl.RUnlock()
+			<-t.C
 		}
-	}()
 
-	time.Sleep(1 * time.Second)
-	c.Broadcast()
-	time.Sleep(1 * time.Second)
-	c.Broadcast()
-	time.Sleep(1 * time.Second)
-	fmt.Println("Done.")
+	}()
+	n := 20
+	wg.Add(n)
+	for i := 0; i < n; i++ {
+		go writer(i)
+	}
+	wg.Wait()
+	fmt.Println("Test Done.")
+}
+
+/*
+empty() 堆栈为空则返回真
+pop() 移除栈顶元素（不会返回栈顶元素的值）
+push() 在栈顶增加元素
+size() 返回栈中元素数目
+top() 返回栈顶元素 [1]
+*/
+
+func TestABStack(t *testing.T) {
+	abq := NewABStack()
+	abq.Push(newItem(0, uint(1)))
+	abq.ForEach(func(i *Item) bool {
+		fmt.Println("->", i.p, i.n)
+		return true
+	})
+}
+
+func TestFoo(t *testing.T) {
+	var p chan int
+
+	p = make(chan int)
+	n1 := &p
+	fmt.Println("Foobar", n1)
+	a1 := unsafe.Pointer(n1)
+	b := uintptr(a1)
+	fmt.Println("1=======>", b)
+	fmt.Println("2=======>", uint(b))
 
 }
