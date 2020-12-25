@@ -2,20 +2,20 @@ package mutex
 
 import (
 	"context"
-	"fmt"
 	"sync"
 	"unsafe"
 )
 
 // Plock :
 type Plock struct {
-	Stack        *ABStack
-	mmap         map[uint]chan chan struct{}
-	eventCh      chan struct{}
-	ctx          context.Context
-	lock         *sync.Mutex
-	tlock        *sync.RWMutex
-	lastUnlockFn UnlockFn
+	Stack   *ABStack
+	mmap    map[uint]chan chan struct{}
+	eventCh chan struct{}
+	ctx     context.Context
+	lock    *sync.Mutex
+	tlock   *sync.RWMutex
+	//lastUnlockFn UnlockFn
+	tcloseCh chan chan struct{}
 }
 
 // NewPlock :
@@ -24,11 +24,12 @@ func NewPlock(_ctx context.Context) *Plock {
 	pl := &Plock{
 		ctx: _ctx,
 		//Queue:   make([]*Item, 0),
-		Stack:   NewABStack(),
-		mmap:    make(map[uint]chan chan struct{}, slot),
-		eventCh: make(chan struct{}, slot),
-		lock:    new(sync.Mutex),
-		tlock:   new(sync.RWMutex),
+		Stack:    NewABStack(),
+		mmap:     make(map[uint]chan chan struct{}, slot),
+		eventCh:  make(chan struct{}, slot*4096),
+		lock:     new(sync.Mutex),
+		tlock:    new(sync.RWMutex),
+		tcloseCh: make(chan chan struct{}, 1),
 	}
 
 	for _, fn := range pl.eventHandler() {
@@ -38,7 +39,7 @@ func NewPlock(_ctx context.Context) *Plock {
 }
 
 // UnlockFn :
-type UnlockFn func() uint
+//type UnlockFn func() uint
 
 // RLock : read lock
 func (p *Plock) RLock() {
@@ -52,23 +53,30 @@ func (p *Plock) RUnlock() {
 
 // Unlock :
 func (p *Plock) Unlock() {
-	if p.lastUnlockFn != nil {
-		p.lastUnlockFn()
+	//p.lastUnlockFn()
+	// TODO close unlockCh
+	select {
+	case uncloseCh := <-p.tcloseCh:
+		p.tlock.Unlock()
+		close(uncloseCh)
+	default:
+		panic("not locked")
 	}
+
 }
 
 // Lock : default priority is 254
 func (p *Plock) Lock() {
-	p.lastUnlockFn = p.lockFn(1)
+	p.lockFn(1)
 }
 
 // Lock0 :
 func (p *Plock) Lock0() {
-	p.lastUnlockFn = p.lockFn(0)
+	p.lockFn(0)
 }
 
 // Lock1 : pri to set priority
-func (p *Plock) lockFn(pri byte) UnlockFn {
+func (p *Plock) lockFn(pri byte) {
 	// 1 注册一个拿锁请求
 	lockCh := make(chan chan struct{}, 1)
 	n := uintptr(unsafe.Pointer(&lockCh))
@@ -80,23 +88,24 @@ func (p *Plock) lockFn(pri byte) UnlockFn {
 	p.lock.Unlock()
 
 	var unlockCh chan struct{}
-	// 3 等读锁
+	// 3 等通知
 	p.eventCh <- struct{}{}
-
-	// 4 等待叫号
 	unlockCh = <-lockCh
-	// 5 到号，上锁
+	// 到号，上锁
 	p.tlock.Lock()
-	return func() uint {
-		defer func() {
-			if err := recover(); err != nil {
-				fmt.Println("unlock err :", err)
-			}
-		}()
-		close(unlockCh)
-		p.tlock.Unlock()
-		return item.n
-	}
+	p.tcloseCh <- unlockCh
+	/*
+		return func() uint {
+			defer func() {
+				if err := recover(); err != nil {
+					fmt.Println("unlock err :", err)
+				}
+			}()
+			close(unlockCh)
+			p.tlock.Unlock()
+			return item.n
+		}
+	*/
 }
 
 func (p *Plock) eventHandler() []func() {
@@ -116,6 +125,8 @@ func (p *Plock) eventHandler() []func() {
 			unlockCh := make(chan struct{})
 			v <- unlockCh
 			<-unlockCh
+		} else {
+			panic("????????")
 		}
 	}
 	return []func(){

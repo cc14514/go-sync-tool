@@ -29,34 +29,31 @@ func TestRLock(t *testing.T) {
 			pl.RUnlock()
 			fmt.Println(time.Now(), "[test] --> Read : ", i, rmap)
 		}
-		for n := 0; n < 2; n++ {
-			go func() {
-				i := 0
-				for j := 0; j < 10; j++ {
-					select {
-					case <-stopCh:
-						fn(i)
-						panic(1)
-					default:
-						fn(i)
-					}
-					i++
-				}
-			}()
+		for j := 0; j < 10; j++ {
+			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-stopCh:
+				fn(j)
+				return
+			default:
+				fn(j)
+			}
 		}
 	}()
 
 	wg := new(sync.WaitGroup)
 	// write
-	for i := 0; i < 100; i++ {
+	for i := 0; i < 1000; i++ {
 		wg.Add(1)
 		go func(j int) {
 			defer func() {
 				wg.Done()
 				fmt.Println(time.Now(), "[test] --> Write Done.", j)
 			}()
-			for n := 0; n < 10000; n++ {
-				pl.Lock()
+			for n := 0; n < 1000; n++ {
+				//fmt.Println("-------------->", j, n)
+				pl.Lock0()
+				//fmt.Println("-------------------------------------<", j, n)
 				m[fmt.Sprintf("%d-%d", j, n)] = n
 				pl.Unlock()
 			}
