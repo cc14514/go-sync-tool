@@ -13,7 +13,11 @@ func BenchmarkPlock(b *testing.B) {
 	b.Run("p", func(b *testing.B) {
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			pl.Lock()
+			if i%2 == 0 {
+				pl.Lock0()
+			} else {
+				pl.Lock()
+			}
 			pl.Unlock()
 		}
 	})

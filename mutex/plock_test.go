@@ -7,7 +7,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-	"unsafe"
 )
 
 var pl = NewPlock(context.Background())
@@ -43,16 +42,22 @@ func TestRLock(t *testing.T) {
 
 	wg := new(sync.WaitGroup)
 	// write
-	for i := 0; i < 1000; i++ {
+	for i := 0; i < 30; i++ {
 		wg.Add(1)
 		go func(j int) {
 			defer func() {
 				wg.Done()
 				fmt.Println(time.Now(), "[test] --> Write Done.", j)
 			}()
-			for n := 0; n < 1000; n++ {
+			for n := 0; n < 10; n++ {
 				//fmt.Println("-------------->", j, n)
-				pl.Lock0()
+				if j%10 == 0 {
+					pl.Lock0()
+					fmt.Println("1111111111", j)
+				} else {
+					pl.Lock()
+					fmt.Println("2222222222", j)
+				}
 				//fmt.Println("-------------------------------------<", j, n)
 				m[fmt.Sprintf("%d-%d", j, n)] = n
 				pl.Unlock()
@@ -208,32 +213,33 @@ func TestAsync2(t *testing.T) {
 	fmt.Println("Test Done.")
 }
 
-/*
-empty() 堆栈为空则返回真
-pop() 移除栈顶元素（不会返回栈顶元素的值）
-push() 在栈顶增加元素
-size() 返回栈中元素数目
-top() 返回栈顶元素 [1]
-*/
+func TestAB(t *testing.T) {
+	m := make(map[string]uint64)
+	fn := func(k string) {
+		var i uint64 = 0
+		for {
+			pl.Lock()
+			m[fmt.Sprintf("%s-%d", k, i)] = i
+			pl.Unlock()
+			i++
+		}
+	}
+	for i := 0; i < 10000; i++ {
+		go fn(fmt.Sprintf("t%d", i))
+	}
+	fmt.Println("-----------------------------------------------> lock")
+	for i := 0; i < 6; i++ {
+		time.Sleep(1 * time.Second)
+		pl.Lock()
+		fmt.Println(time.Now(), " -- ", i, len(m))
+		pl.Unlock()
+	}
 
-func TestABStack(t *testing.T) {
-	abq := NewABStack()
-	abq.Push(newItem(0, uint(1)))
-	abq.ForEach(func(i *Item) bool {
-		fmt.Println("->", i.p, i.n)
-		return true
-	})
-}
-
-func TestFoo(t *testing.T) {
-	var p chan int
-
-	p = make(chan int)
-	n1 := &p
-	fmt.Println("Foobar", n1)
-	a1 := unsafe.Pointer(n1)
-	b := uintptr(a1)
-	fmt.Println("1=======>", b)
-	fmt.Println("2=======>", uint(b))
-
+	fmt.Println("-----------------------------------------------> lock0")
+	for i := 0; i < 6; i++ {
+		time.Sleep(1 * time.Second)
+		pl.Lock0()
+		fmt.Println(time.Now(), " -- ", i, len(m))
+		pl.Unlock()
+	}
 }
